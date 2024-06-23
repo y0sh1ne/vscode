@@ -1202,12 +1202,10 @@ export interface ExtHostSpeechShape {
 export interface MainThreadLanguageModelsShape extends IDisposable {
 	$registerLanguageModelProvider(handle: number, identifier: string, metadata: ILanguageModelChatMetadata): void;
 	$unregisterProvider(handle: number): void;
-	$handleProgressChunk(requestId: number, chunk: IChatResponseFragment): Promise<void>;
-
+	$tryStartChatRequest(extension: ExtensionIdentifier, provider: string, requestId: number, messages: IChatMessage[], options: {}, token: CancellationToken): Promise<void>;
+	$handleResponsePart(requestId: number, chunk: IChatResponseFragment): Promise<void>;
+	$handleResponseDone(requestId: number, error: any | undefined): Promise<void>;
 	$selectChatModels(selector: ILanguageModelChatSelector): Promise<string[]>;
-
-	$fetchResponse(extension: ExtensionIdentifier, provider: string, requestId: number, messages: IChatMessage[], options: {}, token: CancellationToken): Promise<any>;
-
 	$whenLanguageModelChatRequestMade(identifier: string, extension: ExtensionIdentifier, participant?: string, tokenCount?: number): void;
 	$countTokens(provider: string, value: string | IChatMessage, token: CancellationToken): Promise<number>;
 }
@@ -1215,8 +1213,9 @@ export interface MainThreadLanguageModelsShape extends IDisposable {
 export interface ExtHostLanguageModelsShape {
 	$acceptChatModelMetadata(data: ILanguageModelsChangeEvent): void;
 	$updateModelAccesslist(data: { from: ExtensionIdentifier; to: ExtensionIdentifier; enabled: boolean }[]): void;
-	$provideLanguageModelResponse(handle: number, requestId: number, from: ExtensionIdentifier, messages: IChatMessage[], options: { [name: string]: any }, token: CancellationToken): Promise<any>;
-	$handleResponseFragment(requestId: number, chunk: IChatResponseFragment): Promise<void>;
+	$startChatRequest(handle: number, requestId: number, from: ExtensionIdentifier, messages: IChatMessage[], options: { [name: string]: any }, token: CancellationToken): Promise<void>;
+	$acceptResponsePart(requestId: number, chunk: IChatResponseFragment): Promise<void>;
+	$acceptResponseDone(requestId: number, error: any | undefined): Promise<void>;
 	$provideTokenLength(handle: number, value: string | IChatMessage, token: CancellationToken): Promise<number>;
 }
 
@@ -1515,7 +1514,8 @@ export type SCMRawResourceSplices = [
 export interface SCMHistoryItemGroupDto {
 	readonly id: string;
 	readonly name: string;
-	readonly base?: Omit<SCMHistoryItemGroupDto, 'base'>;
+	readonly base?: Omit<Omit<SCMHistoryItemGroupDto, 'base'>, 'remote'>;
+	readonly remote?: Omit<Omit<SCMHistoryItemGroupDto, 'base'>, 'remote'>;
 }
 
 export interface SCMHistoryItemDto {
@@ -1525,6 +1525,15 @@ export interface SCMHistoryItemDto {
 	readonly author?: string;
 	readonly icon?: UriComponents | { light: UriComponents; dark: UriComponents } | ThemeIcon;
 	readonly timestamp?: number;
+	readonly statistics?: {
+		readonly files: number;
+		readonly insertions: number;
+		readonly deletions: number;
+	};
+	readonly labels?: {
+		readonly title: string;
+		readonly icon?: UriComponents | { light: UriComponents; dark: UriComponents } | ThemeIcon;
+	}[];
 }
 
 export interface SCMHistoryItemChangeDto {
@@ -2180,6 +2189,7 @@ export interface ExtHostLanguageFeaturesShape {
 	$resolveCompletionItem(handle: number, id: ChainedCacheId, token: CancellationToken): Promise<ISuggestDataDto | undefined>;
 	$releaseCompletionItems(handle: number, id: number): void;
 	$provideInlineCompletions(handle: number, resource: UriComponents, position: IPosition, context: languages.InlineCompletionContext, token: CancellationToken): Promise<IdentifiableInlineCompletions | undefined>;
+	$provideInlineEdits(handle: number, resource: UriComponents, range: IRange, context: languages.InlineCompletionContext, token: CancellationToken): Promise<IdentifiableInlineCompletions | undefined>;
 	$handleInlineCompletionDidShow(handle: number, pid: number, idx: number, updatedInsertText: string): void;
 	$handleInlineCompletionPartialAccept(handle: number, pid: number, idx: number, acceptedCharacters: number, info: languages.PartialAcceptInfo): void;
 	$freeInlineCompletionsList(handle: number, pid: number): void;
@@ -2317,6 +2327,7 @@ export interface ExtHostSCMShape {
 	$validateInput(sourceControlHandle: number, value: string, cursorPosition: number): Promise<[string | IMarkdownString, number] | undefined>;
 	$setSelectedSourceControl(selectedSourceControlHandle: number | undefined): Promise<void>;
 	$provideHistoryItems(sourceControlHandle: number, historyItemGroupId: string, options: any, token: CancellationToken): Promise<SCMHistoryItemDto[] | undefined>;
+	$provideHistoryItems2(sourceControlHandle: number, options: any, token: CancellationToken): Promise<SCMHistoryItemDto[] | undefined>;
 	$provideHistoryItemSummary(sourceControlHandle: number, historyItemId: string, historyItemParentId: string | undefined, token: CancellationToken): Promise<SCMHistoryItemDto | undefined>;
 	$provideHistoryItemChanges(sourceControlHandle: number, historyItemId: string, historyItemParentId: string | undefined, token: CancellationToken): Promise<SCMHistoryItemChangeDto[] | undefined>;
 	$resolveHistoryItemGroupCommonAncestor(sourceControlHandle: number, historyItemGroupId1: string, historyItemGroupId2: string | undefined, token: CancellationToken): Promise<{ id: string; ahead: number; behind: number } | undefined>;
