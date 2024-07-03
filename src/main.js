@@ -8,7 +8,7 @@
 
 /**
  * @import { IProductConfiguration } from './vs/base/common/product'
- * @import { NLSConfiguration } from './vs/base/node/languagePacks'
+ * @import { INLSConfiguration } from './vs/nls'
  * @import { NativeParsedArgs } from './vs/platform/environment/common/argv'
  */
 
@@ -16,7 +16,7 @@ const perf = require('./vs/base/common/performance');
 perf.mark('code/didStartMain');
 
 const path = require('path');
-const fs = require('fs');
+const fs = require('original-fs');
 const os = require('os');
 const bootstrap = require('./bootstrap');
 const bootstrapNode = require('./bootstrap-node');
@@ -109,27 +109,29 @@ protocol.registerSchemesAsPrivileged([
 registerListeners();
 
 /**
- * Support user defined locale: load it early before app('ready')
- * to have more things running in parallel.
+ * We can resolve the NLS configuration early if it is defined
+ * in argv.json before `app.ready` event. Otherwise we can only
+ * resolve NLS after `app.ready` event to resolve the OS locale.
  *
- * @type {Promise<NLSConfiguration> | undefined}
+ * @type {Promise<INLSConfiguration> | undefined}
  */
 let nlsConfigurationPromise = undefined;
 
-/**
- * @type {String}
- **/
 // Use the most preferred OS language for language recommendation.
 // The API might return an empty array on Linux, such as when
 // the 'C' locale is the user's only configured locale.
 // No matter the OS, if the array is empty, default back to 'en'.
-const resolved = app.getPreferredSystemLanguages()?.[0] ?? 'en';
-const osLocale = processZhLocale(resolved.toLowerCase());
-const metaDataFile = path.join(__dirname, 'nls.metadata.json');
-const locale = getUserDefinedLocale(argvConfig);
-if (locale) {
-	const { getNLSConfiguration } = require('./vs/base/node/languagePacks');
-	nlsConfigurationPromise = getNLSConfiguration(product.commit, userDataPath, metaDataFile, locale, osLocale);
+const osLocale = processZhLocale((app.getPreferredSystemLanguages()?.[0] ?? 'en').toLowerCase());
+const userLocale = getUserDefinedLocale(argvConfig);
+if (userLocale) {
+	const { resolveNLSConfiguration } = require('./vs/base/node/nls');
+	nlsConfigurationPromise = resolveNLSConfiguration({
+		userLocale,
+		osLocale,
+		commit: product.commit,
+		userDataPath,
+		nlsMetadataPath: __dirname
+	});
 }
 
 // Pass in the locale to Electron so that the
@@ -141,7 +143,7 @@ if (locale) {
 // In that case, use `en` as the Electron locale.
 
 if (process.platform === 'win32' || process.platform === 'linux') {
-	const electronLocale = (!locale || locale === 'qps-ploc') ? 'en' : locale;
+	const electronLocale = (!userLocale || userLocale === 'qps-ploc') ? 'en' : userLocale;
 	app.commandLine.appendSwitch('lang', electronLocale);
 }
 
@@ -161,15 +163,28 @@ app.once('ready', function () {
 	}
 });
 
+async function onReady() {
+	perf.mark('code/mainAppReady');
+
+	try {
+		const [, nlsConfig] = await Promise.all([
+			mkdirpIgnoreError(codeCachePath),
+			resolveNlsConfiguration()
+		]);
+
+		startup(codeCachePath, nlsConfig);
+	} catch (error) {
+		console.error(error);
+	}
+}
+
 /**
  * Main startup routine
  *
  * @param {string | undefined} codeCachePath
- * @param {NLSConfiguration} nlsConfig
+ * @param {INLSConfiguration} nlsConfig
  */
 function startup(codeCachePath, nlsConfig) {
-	nlsConfig._languagePackSupport = true;
-
 	process.env['VSCODE_NLS_CONFIG'] = JSON.stringify(nlsConfig);
 	process.env['VSCODE_CODE_CACHE_PATH'] = codeCachePath || '';
 
@@ -178,18 +193,6 @@ function startup(codeCachePath, nlsConfig) {
 	require('./bootstrap-amd').load('vs/code/electron-main/main', () => {
 		perf.mark('code/didLoadMainBundle');
 	});
-}
-
-async function onReady() {
-	perf.mark('code/mainAppReady');
-
-	try {
-		const [, nlsConfig] = await Promise.all([mkdirpIgnoreError(codeCachePath), resolveNlsConfiguration()]);
-
-		startup(codeCachePath, nlsConfig);
-	} catch (error) {
-		console.error(error);
-	}
 }
 
 /**
@@ -212,6 +215,7 @@ function configureCommandlineSwitchesSync(cliArgs) {
 	];
 
 	if (process.platform === 'linux') {
+
 		// Force enable screen readers on Linux via this flag
 		SUPPORTED_ELECTRON_SWITCHES.push('force-renderer-accessibility');
 
@@ -246,10 +250,7 @@ function configureCommandlineSwitchesSync(cliArgs) {
 					app.commandLine.appendSwitch(argvKey);
 				}
 			} else if (argvValue) {
-				if (argvKey === 'force-color-profile') {
-					// Color profile
-					app.commandLine.appendSwitch(argvKey, argvValue);
-				} else if (argvKey === 'password-store') {
+				if (argvKey === 'password-store') {
 					// Password store
 					// TODO@TylerLeonhardt: Remove this migration in 3 months
 					let migratedArgvValue = argvValue;
@@ -257,6 +258,8 @@ function configureCommandlineSwitchesSync(cliArgs) {
 						migratedArgvValue = 'gnome-libsecret';
 					}
 					app.commandLine.appendSwitch(argvKey, migratedArgvValue);
+				} else {
+					app.commandLine.appendSwitch(argvKey, argvValue);
 				}
 			}
 		}
@@ -588,23 +591,13 @@ function getCodeCachePath() {
 }
 
 /**
- * @param {string} dir
- * @returns {Promise<string>}
- */
-function mkdirp(dir) {
-	return new Promise((resolve, reject) => {
-		fs.mkdir(dir, { recursive: true }, err => (err && err.code !== 'EEXIST') ? reject(err) : resolve(dir));
-	});
-}
-
-/**
  * @param {string | undefined} dir
  * @returns {Promise<string | undefined>}
  */
 async function mkdirpIgnoreError(dir) {
 	if (typeof dir === 'string') {
 		try {
-			await mkdirp(dir);
+			await fs.promises.mkdir(dir, { recursive: true });
 
 			return dir;
 		} catch (error) {
@@ -644,35 +637,47 @@ function processZhLocale(appLocale) {
 /**
  * Resolve the NLS configuration
  *
- * @return {Promise<NLSConfiguration>}
+ * @return {Promise<INLSConfiguration>}
  */
 async function resolveNlsConfiguration() {
 
-	// First, we need to test a user defined locale. If it fails we try the app locale.
+	// First, we need to test a user defined locale.
+	// If it fails we try the app locale.
 	// If that fails we fall back to English.
-	let nlsConfiguration = nlsConfigurationPromise ? await nlsConfigurationPromise : undefined;
+
+	const nlsConfiguration = nlsConfigurationPromise ? await nlsConfigurationPromise : undefined;
 	if (nlsConfiguration) {
 		return nlsConfiguration;
 	}
 
-	// Try to use the app locale. Please note that the app locale is only
-	// valid after we have received the app ready event. This is why the
-	// code is here.
+	// Try to use the app locale which is only valid
+	// after the app ready event has been fired.
 
-	/**
-	 * @type string
-	 */
-	let appLocale = app.getLocale();
-	if (!appLocale) {
-		return { locale: 'en', osLocale, availableLanguages: {} };
+	let userLocale = app.getLocale();
+	if (!userLocale) {
+		return {
+			userLocale: 'en',
+			osLocale,
+			resolvedLanguage: 'en',
+			defaultMessagesFile: path.join(__dirname, 'nls.messages.json'),
+
+			// NLS: below 2 are a relic from old times only used by vscode-nls and deprecated
+			locale: 'en',
+			availableLanguages: {}
+		};
 	}
 
 	// See above the comment about the loader and case sensitiveness
-	appLocale = processZhLocale(appLocale.toLowerCase());
+	userLocale = processZhLocale(userLocale.toLowerCase());
 
-	const { getNLSConfiguration } = require('./vs/base/node/languagePacks');
-	nlsConfiguration = await getNLSConfiguration(product.commit, userDataPath, metaDataFile, appLocale, osLocale);
-	return nlsConfiguration ?? { locale: 'en', osLocale, availableLanguages: {} };
+	const { resolveNLSConfiguration } = require('./vs/base/node/nls');
+	return resolveNLSConfiguration({
+		userLocale,
+		osLocale,
+		commit: product.commit,
+		userDataPath,
+		nlsMetadataPath: __dirname
+	});
 }
 
 /**
@@ -690,7 +695,7 @@ function getUserDefinedLocale(argvConfig) {
 		return locale.toLowerCase(); // a directly provided --locale always wins
 	}
 
-	return argvConfig.locale && typeof argvConfig.locale === 'string' ? argvConfig.locale.toLowerCase() : undefined;
+	return typeof argvConfig?.locale === 'string' ? argvConfig.locale.toLowerCase() : undefined;
 }
 
 //#endregion
